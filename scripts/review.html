@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>評分審核</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --text:#1d2329; --muted:#6b7480;
+          --ok:#1f8a4c; --warn:#b26a00; --bad:#c0392b; --accent:#2f6fde; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+         background:var(--bg); color:var(--text); height:100vh; display:grid;
+         grid-template-columns: 200px 1fr 460px; }
+  #list { border-right:1px solid var(--line); overflow:auto; background:var(--panel); }
+  #list .hdr { padding:10px 12px; font-weight:600; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
+  #list .row { padding:7px 12px; cursor:pointer; display:flex; gap:6px; align-items:center; border-bottom:1px solid #f0f1f3; }
+  #list .row:hover { background:#f2f5fb; } #list .row.cur { background:#e5edfb; }
+  .dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .row .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .sc { color:var(--muted); font-variant-numeric: tabular-nums; }
+  #pages { overflow:auto; padding:12px; }
+  #pages img { width:100%; display:block; margin:0 0 12px; border:1px solid var(--line); background:#fff; cursor:zoom-in; }
+  #pages.zoom img { width:180%; cursor:zoom-out; }
+  #side { border-left:1px solid var(--line); background:var(--panel); overflow:auto; padding:14px 16px 90px; }
+  h2 { margin:0 0 2px; font-size:18px; } .sub { color:var(--muted); margin-bottom:10px; }
+  .issues { background:#fff6e5; border:1px solid #f1d39a; color:#6b4a00; border-radius:6px; padding:8px 10px; margin:8px 0 12px; }
+  .issues div::before { content:"⚠ "; }
+  .sp { border:1px solid var(--line); border-radius:8px; margin:0 0 14px; }
+  .sp .top { display:flex; justify-content:space-between; padding:8px 10px; background:#fafbfc; border-bottom:1px solid var(--line); border-radius:8px 8px 0 0; }
+  .sp .top b { font-size:15px; } .score { font-weight:600; font-variant-numeric: tabular-nums; }
+  .it { padding:8px 10px; border-bottom:1px solid #f0f1f3; }
+  .it .h { display:flex; gap:8px; align-items:center; }
+  .it .id { font-weight:600; width:30px; } .it .desc { flex:1; color:var(--muted); font-size:12px; }
+  .it input { width:58px; padding:3px 5px; border:1px solid var(--line); border-radius:4px; text-align:right; font:inherit; }
+  .it input.lost { border-color:var(--warn); background:#fff9ef; }
+  textarea { width:100%; border:1px solid var(--line); border-radius:4px; padding:5px 7px; font:inherit; resize:vertical; }
+  .it textarea { margin-top:5px; font-size:12.5px; color:#3a434d; }
+  .it input.nt { width:100%; margin-top:5px; text-align:left; font-size:12.5px; }
+  .cm { padding:8px 10px; } .cm label { font-size:12px; color:var(--muted); }
+  .cm textarea { font-family: ui-monospace, Menlo, monospace; font-size:12.5px; min-height:70px; }
+  details { margin:6px 0 12px; } summary { cursor:pointer; color:var(--muted); }
+  pre { white-space:pre-wrap; background:#fafbfc; border:1px solid var(--line); padding:8px; border-radius:6px; font-size:12.5px; }
+  #bar { position:fixed; right:0; bottom:0; width:460px; background:var(--panel); border-top:1px solid var(--line);
+         padding:10px 16px; display:flex; gap:8px; }
+  button { font:inherit; padding:7px 12px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); flex:1; }
+  button:disabled { opacity:.5; cursor:default; }
+  .muted { color:var(--muted); } .err { color:var(--bad); padding:20px; }
+  kbd { font-size:11px; border:1px solid var(--line); border-radius:3px; padding:0 4px; background:#fafbfc; }
+</style>
+</head>
+<body>
+<div id="list"><div class="hdr" id="progress">載入中…</div><div id="rows"></div></div>
+<div id="pages"></div>
+<div id="side"></div>
+<div id="bar">
+  <button id="prev">← 上一位</button>
+  <button id="approve" class="primary">核准 <kbd>A</kbd></button>
+  <button id="next">下一位 →</button>
+</div>
+<script>
+let S = null, cur = 0, draft = null;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function load() {
+  S = await (await fetch("/api/state")).json(); document.title = S.question + " 評分審核";
+  // 排序：有問題的在前，再來未核准，最後已核准
+  renderList(); show(cur);
+}
+function statusOf(st) {
+  if (st.approved) return ["var(--ok)", "已核准"];
+  if (!st.result) return ["#c5cad1", st.error || "未評分"];
+  if (st.issues.length) return ["var(--warn)", "需注意"];
+  return ["var(--accent)", "待審"];
+}
+function totals(st) {
+  const src = st.approved || st.result; if (!src) return "";
+  return Object.keys(S.rubric.subparts).map(k => (src.subparts[k] || {}).total ?? "?").join(" / ");
+}
+function renderList() {
+  const done = S.students.filter(s => s.approved).length;
+  $("#progress").textContent = `已核准 ${done} / ${S.students.length}`;
+  $("#rows").innerHTML = S.students.map((st, i) => {
+    const [c, t] = statusOf(st);
+    return `<div class="row ${i===cur?"cur":""}" data-i="${i}" title="${esc(t)}">
+      <span class="dot" style="background:${c}"></span>
+      <span class="nm">${esc(st.student)} ${esc(st.name)}</span><span class="sc">${esc(totals(st))}</span></div>`;
+  }).join("");
+  document.querySelectorAll("#list .row").forEach(r => r.onclick = () => show(+r.dataset.i));
+}
+function show(i) {
+  cur = Math.max(0, Math.min(S.students.length - 1, i));
+  const st = S.students[cur];
+  renderList();
+  $("#pages").innerHTML = st.images.map(u => `<img src="${u}" loading="lazy">`).join("") || '<div class="muted">沒有頁面圖片</div>';
+  document.querySelectorAll("#pages img").forEach(im => im.onclick = () => $("#pages").classList.toggle("zoom"));
+  $("#pages").scrollTop = 0;
+  const src = st.approved || st.result;
+  if (!src) { $("#side").innerHTML = `<h2>${esc(st.student)} ${esc(st.name)}</h2><div class="err">${esc(st.error)}</div>`; $("#approve").disabled = true; return; }
+  $("#approve").disabled = false;
+  draft = JSON.parse(JSON.stringify({subparts: src.subparts}));
+  const R = S.rubric, byId = Object.fromEntries(R.items.map(it => [it.id, it]));
+  let h = `<h2>${esc(st.student)} ${esc(st.name)}</h2>
+    ${st.gemini_url ? `<a href="${esc(st.gemini_url)}" target="_blank" rel="noopener" style="font-size:13px">在 Gemini 打開這段對話 ↗</a>` : ""}
+    <div class="sub">${st.approved ? "✅ 已核准（可再修改後重新核准）" : "Gemini 建議 · 信心 " + esc(st.result.confidence)}</div>`;
+  if (st.issues.length && !st.approved) h += `<div class="issues">${st.issues.map(x => `<div>${esc(x)}</div>`).join("")}</div>`;
+  for (const [k, meta] of Object.entries(R.subparts)) {
+    const sp = draft.subparts[k] || (draft.subparts[k] = {items: [], comment_to_student: ""});
+    h += `<div class="sp"><div class="top"><b>${esc(meta.gradescope_label)} (${esc(k)})</b>
+          <span class="score" id="sc-${k}"></span></div>`;
+    sp.items.forEach((it, j) => {
+      const ref = byId[it.id] || {points: 0, desc: "?"};
+      h += `<div class="it"><div class="h"><span class="id">${esc(it.id)}</span>
+        <span class="desc">${esc(ref.desc)}</span>
+        <input type="number" step="0.5" min="0" max="${ref.points}" value="${esc(it.awarded)}" data-k="${k}" data-j="${j}" class="aw">
+        <span class="muted">/ ${ref.points}</span></div>
+        <input class="nt" data-k="${k}" data-j="${j}" value="${esc(it.note)}" placeholder="給學生看的短評（會寫進 comment）">
+        <textarea rows="2" data-k="${k}" data-j="${j}" class="rs" placeholder="理由（給你看）">${esc(it.reason)}</textarea></div>`;
+    });
+    if (!sp.comment_edited) sp.comment_to_student = buildComment(k);
+    h += `<div class="cm"><label>寫進 Gradescope 的 comment（學生看得到）
+          <button class="regen" data-k="${k}" style="float:right;padding:1px 8px;font-size:12px">依分數重新產生</button></label>
+          <textarea data-k="${k}" class="cmt" rows="${sp.items.length + 1}">${esc(sp.comment_to_student)}</textarea></div></div>`;
+  }
+  if (st.result && st.result.transcription)
+    h += `<details><summary>Gemini 讀到的學生答案（抄寫）</summary><pre>${esc(st.result.transcription)}</pre></details>`;
+  h += `<div class="sp"><div class="top"><b>重評說明（給 Gemini）</b><span class="muted" id="note-st">${st.regrade_note ? "已存，等待重評" : ""}</span></div>
+    <div class="cm"><textarea id="note" rows="3" placeholder="例如：這位用歸納法證明，也算正確解法，請重新評 R2、R3">${esc(st.regrade_note)}</textarea>
+    <button id="save-note" style="margin-top:6px">存成重評說明</button></div></div>`;
+  $("#side").innerHTML = h;
+  $("#save-note").onclick = async () => {
+    await fetch("/api/regrade_note", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({student: st.student, note: $("#note").value})});
+    st.regrade_note = $("#note").value.trim();
+    $("#note-st").textContent = st.regrade_note ? "已存，等待重評" : "已清除";
+  };
+  document.querySelectorAll(".aw").forEach(el => el.oninput = () => {
+    draft.subparts[el.dataset.k].items[+el.dataset.j].awarded = parseFloat(el.value || 0); refreshScores(); syncComment(el.dataset.k); });
+  document.querySelectorAll(".nt").forEach(el => el.oninput = () => {
+    draft.subparts[el.dataset.k].items[+el.dataset.j].note = el.value; syncComment(el.dataset.k); });
+  document.querySelectorAll(".regen").forEach(el => el.onclick = () => {
+    draft.subparts[el.dataset.k].comment_edited = false; syncComment(el.dataset.k); });
+  document.querySelectorAll(".rs").forEach(el => el.oninput = () => {
+    draft.subparts[el.dataset.k].items[+el.dataset.j].reason = el.value; });
+  document.querySelectorAll(".cmt").forEach(el => el.oninput = () => {
+    draft.subparts[el.dataset.k].comment_to_student = el.value; draft.subparts[el.dataset.k].comment_edited = true; });
+  refreshScores();
+  $("#side").scrollTop = 0;
+}
+function fmt(n) { return Number.isInteger(+n) ? String(+n) : String(+n); }
+function buildComment(k) {
+  const byId = Object.fromEntries(S.rubric.items.map(it => [it.id, it]));
+  return draft.subparts[k].items.map(it => {
+    const ref = byId[it.id] || {points: "?"};
+    return `(${fmt(it.awarded)}/${ref.points}) ${(it.note || "").trim()}`.trim();
+  }).join("\n");
+}
+function syncComment(k) {
+  const sp = draft.subparts[k];
+  if (sp.comment_edited) return;
+  sp.comment_to_student = buildComment(k);
+  const el = document.querySelector(`.cmt[data-k="${k}"]`); if (el) el.value = sp.comment_to_student;
+}
+function refreshScores() {
+  const byId = Object.fromEntries(S.rubric.items.map(it => [it.id, it]));
+  for (const [k, meta] of Object.entries(S.rubric.subparts)) {
+    const t = draft.subparts[k].items.reduce((a, it) => a + (+it.awarded || 0), 0);
+    const el = $("#sc-" + k); if (!el) continue;
+    const d = t - meta.max_points;
+    el.textContent = `${t} / ${meta.max_points}` + (d ? `　（Gradescope 調整 ${d}）` : "");
+    el.style.color = d ? "var(--warn)" : "var(--ok)";
+  }
+  document.querySelectorAll(".aw").forEach(el => {
+    const ref = byId[draft.subparts[el.dataset.k].items[+el.dataset.j].id];
+    el.classList.toggle("lost", ref && +el.value < ref.points);
+  });
+}
+async function approve() {
+  const st = S.students[cur]; if (!draft) return;
+  const r = await fetch("/api/approve", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({student: st.student, subparts: draft.subparts})});
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "儲存失敗"); return; }
+  await load(); show(cur + 1);
+}
+$("#approve").onclick = approve;
+$("#prev").onclick = () => show(cur - 1);
+$("#next").onclick = () => show(cur + 1);
+document.addEventListener("keydown", e => {
+  if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+  if (e.key === "a" || e.key === "A") approve();
+  if (e.key === "ArrowRight") show(cur + 1);
+  if (e.key === "ArrowLeft") show(cur - 1);
+});
+load();
+</script>
+</body>
+</html>

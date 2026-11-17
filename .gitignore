@@ -1,0 +1,16 @@
+# 學生資料、登入狀態、考題內容：絕對不要上傳
+profiles/
+submissions/
+work/
+results/
+rubric/*.json
+gradescope_ids.json
+*.pdf
+
+# 探測輸出、本機產物
+probe_output.txt
+probe_gemini.txt
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
